@@ -3,7 +3,7 @@
             2014-71937
             CMSC 180
     Program: Distributing Parts of a Matrix over Sockets
-    Compile: gcc -pthread -o lab04 lab04.c
+    Compile: gcc -pthread lab04.c -o lab04
     Run Master: ./lab04 <N> <P> 0
     Run Slave: ./lab04 <N> <P> 1
 
@@ -22,40 +22,19 @@
 
 typedef struct Parcels {
     int sockfd;
-    // submatrix
-    int row;
-    int column;
+    int *submatrix;
+    int number;
 } Parcel;
 
 int connectToSlave(int* sockfd, struct sockaddr_in* server, char* ipAddress, int ports, int i);
-Parcel* newParcel(int sockfd, int row, int column);
-void* sendMatrix(void* p);
+Parcel * newParcel(int sockfd, int* submatrix, int number);
+void * sendMatrix(void* p);
+void deleteMatrix(int *matrix);
 
 int main(int argc, char* argv[]) {
 
-    /* Master Variables : S == 0 */
-    int** matrix = NULL;
-    char **ipAddress = NULL; 
-    int *ports = NULL;
-    
-    int *sockfd = NULL;
-    struct sockaddr_in *server = NULL;
-    
-    int i, j, counter, N, P, S, T;
+    int i, j, N, P, S, T;
 
-    int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    pthread_attr_t *attr = NULL;
-    cpu_set_t *cpus = NULL;
-    pthread_t *ps = NULL;
-
-    Parcel *p = NULL;
-    int row = 0, column = 0;
-
-    /* Slave Variables : S == 1 */
-    int socket_desc, client_sock, c, read_size;
-    struct sockaddr_in slave, master;
-
-    /* Both */
     FILE *fp = NULL;
     char buff[255];
     struct timeval start, end;
@@ -72,15 +51,32 @@ int main(int argc, char* argv[]) {
 
     // Master
     if (S == 0) {
+        /* Master Variables : S == 0 */
+        int* matrix = NULL;
+        char **ipAddress = NULL; 
+        int *ports = NULL;
+        
+        int *sockfd = NULL;
+        struct sockaddr_in *server = NULL;
+        char server_reply[3];
+        
+        int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+        pthread_attr_t *attr = NULL;
+        cpu_set_t *cpus = NULL;
+        pthread_t *ps = NULL;
+
+        Parcel *p = NULL;
+        int count, remainder, prefixSum, temp;
+        int **submatrix = NULL, *number = NULL;
+
         /* Create a non-zero N * N square matrix M whose elements are assigned with random integer */
-        matrix = (int**)malloc(sizeof(int*) * N);
-        for (i = 0; i < N; i++) {
-            matrix[i] = (int*)malloc(sizeof(int) * N);
-        }
+        matrix = (int*)malloc(sizeof(int) * (N*N));
         for (i = 0; i < N; i++) {
             for (j = 0; j < N; j++) {
-                matrix[i][j] = rand() % 100;
+                matrix[N * i + j] = rand() % 100;
+                // printf("%d\t", matrix[N * i + j]);
             }
+            // printf("\n");
         }
         /* Read the configuration file to determine the IP addresses and ports of the slaves and the number of slaves t */
         fp = fopen("config.in", "r");
@@ -90,21 +86,32 @@ int main(int argc, char* argv[]) {
         
         ipAddress = (char**)malloc(sizeof(char*) * T);
         for (i = 0; i < T; i++) {
-            ipAddress[i] = (char*)malloc(10 * sizeof(char));
+            ipAddress[i] = (char*)malloc(15 * sizeof(char));
         }
         ports = (int*)malloc(sizeof(int) * T);
         
-        counter = 0;
-        while(counter < T) {
-            fscanf(fp, "%s", ipAddress[counter]);
+        for (i = 0; i < T; i++) {
+            fscanf(fp, "%s", ipAddress[i]);
             fscanf(fp, "%s", buff);
-            ports[counter] = atoi(buff);
-            counter++;
+            ports[i] = atoi(buff);
         }
         fclose(fp);
 
-        /* Divide your M into t submatrices of size n * n/t each, m1, m2, ..., mt */
-
+        /* Divide your M into t submatrices of size n/t * n each, m1, m2, ..., mt */
+        submatrix = (int **)malloc(sizeof(int*) * T);
+        number = (int *)malloc(sizeof(int) * T);
+        count = N / T;
+        remainder = N - count * T;
+        prefixSum = 0;
+        for (i = 0; i < T; i++) {
+            temp = (i < remainder) ? count + 1 : count;
+            // submatrix[i] = matrix[prefixSum];
+            int *k = malloc(sizeof(int));
+            k = &matrix[prefixSum];
+            submatrix[i] = k;
+            number[i] = temp * N;
+            prefixSum += number[i];
+        }
 
         /* Take note of the system time time_before */
         gettimeofday(&start, NULL);
@@ -123,24 +130,34 @@ int main(int argc, char* argv[]) {
         }
         // for each slave
         for (i = 0; i < T; i++) {
+            // send the number of integers in the matrix
+            if (send(sockfd[i], &number[i], sizeof(number[i]), 0) < 0) {
+                puts("Number Send failed");
+            }
             // generate a 'parcel' as params for the threaded function 'sendMatrix'
-            // p = newParcel(sockfd[i], &(submatrix[i]), row, column);
-            p = newParcel(sockfd[i], row, column);
+            p = newParcel(sockfd[i], submatrix[i], number[i]);
             if (CORE_AFFINED) {
                 // core-affined setting
                 pthread_attr_init(&attr[i]);
                 CPU_ZERO(&cpus[i]);
                 CPU_SET(i%num_cores, &cpus[i]);
                 pthread_attr_setaffinity_np(&attr[i], sizeof(cpu_set_t), &cpus[i]);
-                pthread_create(&ps[i], &attr[i], sendMatrix, (void*)&p);
+                pthread_create(&ps[i], &attr[i], sendMatrix, (void*)p);
             } else {
                 // non core-affined setting
-                pthread_create(&ps[i], NULL, sendMatrix, (void*)&p);
+                pthread_create(&ps[i], NULL, sendMatrix, (void*)p);
             }
         }
         // wait for all threads
         for (i = 0; i < T; i++) {
+            // Receive a reply from the server
+            // if (recv(sockfd[i], &server_reply, sizeof(server_reply), 0) < 0) {
+            //     puts("recv failed");
+            //     return 0;
+            // }
+            // printf("Server replY: %s\n", server_reply);
             pthread_join(ps[i], NULL);
+            close(sockfd[i]);
         }
 
         /* Receive the acknowledgement "ack" from each slave, for all slaves t */
@@ -159,9 +176,17 @@ int main(int argc, char* argv[]) {
         double elapsed = (end.tv_sec - start.tv_sec) + ((end.tv_usec - start.tv_usec)/1000000.0);
         printf("elapsed: %lf secs\n", elapsed);
 
+        deleteMatrix(matrix);
+
     }
     // Slaves
     else if (S == 1) {
+        /* Slave Variables : S == 1 */
+        int socket_desc, client_sock, c, read_size;
+        struct sockaddr_in slave, master;
+        int *message = NULL;
+        int number;
+
         /* Read from the configuration file what is the IP address of the master */
         fp = fopen("config.in", "r");
         fscanf(fp, "%s", buff);     // master ip address
@@ -209,7 +234,26 @@ int main(int argc, char* argv[]) {
         gettimeofday(&start, NULL);
 
         /* Receive from the master the submatrix mi assigned to it */
-
+        // Receive a message from client
+        int rc;
+        rc = recv(client_sock, &number, sizeof(number), 0);
+        printf("number: %d\n", number);
+        message = (int *)malloc(sizeof(int) * number);
+        read_size = recv(client_sock, message, number * sizeof(int), 0);
+        // for (i = 0; i < 4; ++i) {
+        //     printf("%d\t", message[i]);
+        // }
+        // while ((read_size = recv(client_sock, &message, number * sizeof(int), 0)) > 0) {
+        //     printf("done\n");
+        //     // write(client_sock, "ack", 3 * sizeof(char));
+        // }
+     
+        if (read_size == 0) {
+            puts("Client disconnected");
+        }
+        else if (read_size == -1) {
+            perror("recv failed");
+        }
 
         /* Send an acknowledgement "ack" to the master once the submatrix have been received fully */
 
@@ -223,6 +267,8 @@ int main(int argc, char* argv[]) {
            Output the time_elapsed at each instance's terminal */
         double elapsed = (end.tv_sec - start.tv_sec) + ((end.tv_usec - start.tv_usec)/1000000.0);
         printf("elapsed: %lf secs\n", elapsed);
+
+        deleteMatrix(message);
     }
 
     return 0;
@@ -247,13 +293,13 @@ int connectToSlave(int* sockfd, struct sockaddr_in* server, char* ipAddress, int
     puts("Connected\n");
 }
 
-Parcel* newParcel(int sockfd, int row, int column) {
+Parcel* newParcel(int sockfd, int* submatrix, int number) {
     Parcel *temp;
 
     temp = (Parcel*)malloc(sizeof(Parcel));
     temp->sockfd = sockfd;
-    temp->row = row;
-    temp->column = column;
+    temp->submatrix = submatrix;
+    temp->number = number;
 
     return temp;
 }
@@ -262,11 +308,14 @@ void* sendMatrix(void* p) {
 
     Parcel *parcel = (Parcel *)p;
     int sockfd = parcel->sockfd;
-    int *submatrix = NULL;
-    int row = parcel->row;
-    int column = parcel->column;
+    int *submatrix = parcel->submatrix;
+    int number = parcel->number;
 
-    if (send(parcel->sockfd, &submatrix, (row*column) * sizeof(int), 0) < 0) {
+    if (send(sockfd, submatrix, number * sizeof(int), 0) < 0) {
         puts("Send failed");
     }
+}
+
+void deleteMatrix(int *matrix) {
+    free(matrix);
 }

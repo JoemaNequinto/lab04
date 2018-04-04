@@ -18,7 +18,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define CORE_AFFINED 0
+#define CORE_AFFINED 1
 
 typedef struct Parcels {
     int sockfd;
@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
         
         int *sockfd = NULL;
         struct sockaddr_in *server = NULL;
-        char server_reply[3];
+        char server_reply[4];
         
         int num_cores = sysconf(_SC_NPROCESSORS_ONLN);
         pthread_attr_t *attr = NULL;
@@ -71,6 +71,7 @@ int main(int argc, char* argv[]) {
 
         /* Create a non-zero N * N square matrix M whose elements are assigned with random integer */
         matrix = (int*)malloc(sizeof(int) * (N*N));
+        printf("before\n");
         for (i = 0; i < N; i++) {
             for (j = 0; j < N; j++) {
                 matrix[N * i + j] = rand() % 100;
@@ -78,6 +79,7 @@ int main(int argc, char* argv[]) {
             }
             // printf("\n");
         }
+        printf("after\n");
         /* Read the configuration file to determine the IP addresses and ports of the slaves and the number of slaves t */
         fp = fopen("config.in", "r");
         fscanf(fp, "%s", buff);     // master ip address
@@ -148,21 +150,19 @@ int main(int argc, char* argv[]) {
                 pthread_create(&ps[i], NULL, sendMatrix, (void*)p);
             }
         }
+        /* Receive the acknowledgement "ack" from each slave, for all slaves t */
+        /* Wait when all t slaves have sent their respective acknowledgements */
         // wait for all threads
         for (i = 0; i < T; i++) {
             // Receive a reply from the server
-            // if (recv(sockfd[i], &server_reply, sizeof(server_reply), 0) < 0) {
-            //     puts("recv failed");
-            //     return 0;
-            // }
-            // printf("Server replY: %s\n", server_reply);
+            if (recv(sockfd[i], &server_reply, sizeof(server_reply), 0) < 0) {
+                puts("recv failed");
+                return 0;
+            }
+            printf("Server %d reply: %s\n", i, server_reply);
             pthread_join(ps[i], NULL);
             close(sockfd[i]);
         }
-
-        /* Receive the acknowledgement "ack" from each slave, for all slaves t */
-
-        /* Wait when all t slaves have sent their respective acknowledgements */
 
         /* Take note of the system time time_after */
         gettimeofday(&end, NULL);
@@ -186,6 +186,7 @@ int main(int argc, char* argv[]) {
         struct sockaddr_in slave, master;
         int *message = NULL;
         int number;
+        char ack[4] = "ack";
 
         /* Read from the configuration file what is the IP address of the master */
         fp = fopen("config.in", "r");
@@ -239,14 +240,19 @@ int main(int argc, char* argv[]) {
         rc = recv(client_sock, &number, sizeof(number), 0);
         printf("number: %d\n", number);
         message = (int *)malloc(sizeof(int) * number);
-        read_size = recv(client_sock, message, number * sizeof(int), 0);
-        // for (i = 0; i < 4; ++i) {
-        //     printf("%d\t", message[i]);
+        // read_size = recv(client_sock, message, number * sizeof(int), 0);
+        // printf("read_size: %d\n", read_size);
+        // Receive a message from client
+        while ((read_size = recv(client_sock, message, number * sizeof(int), 0)) > 0) {
+            printf("read_size: %d\n", read_size);
+            write(client_sock, &ack, 4 * sizeof(char));
+        }
+        // for (i = 0; i < number; i++) {
+        //     printf("%d ", message[i]);
         // }
-        // while ((read_size = recv(client_sock, &message, number * sizeof(int), 0)) > 0) {
-        //     printf("done\n");
-        //     // write(client_sock, "ack", 3 * sizeof(char));
-        // }
+        /* Send an acknowledgement "ack" to the master once the submatrix have been received fully */
+        printf("Submatrix received. Acknowledgement \"ack\" sent.\n");
+        // write(client_sock, &ack, 4 * sizeof(char));
      
         if (read_size == 0) {
             puts("Client disconnected");
@@ -254,8 +260,6 @@ int main(int argc, char* argv[]) {
         else if (read_size == -1) {
             perror("recv failed");
         }
-
-        /* Send an acknowledgement "ack" to the master once the submatrix have been received fully */
 
         /* Take note of time_after */
         gettimeofday(&end, NULL);
